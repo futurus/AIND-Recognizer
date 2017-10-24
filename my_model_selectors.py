@@ -68,6 +68,22 @@ class SelectorBIC(ModelSelector):
     Bayesian information criteria: BIC = -2 * logL + p * logN
     """
 
+    def calc_score(self, n):
+        model = self.base_model(n)
+        
+        # From GaussianHMM doc:
+        # params : string, optional 
+        # Controls which parameters are updated in the training process. 
+        # Can contain any combination of ‘s’ for startprob, ‘t’ for transmat, 
+        # ‘m’ for means and ‘c’ for covars. Defaults to all parameters.
+        p = model.startprob_.size + model.transmat_.size + model.means_.size + model.covars_.diagonal().size
+        
+        logL = model.score(self.X, self.lengths)
+        logN = np.log(self.X.shape[0])
+        score = -2 * logL + p * logN
+
+        return model, score
+
     def select(self):
         """ select the best model for self.this_word based on
         BIC score for n between self.min_n_components and self.max_n_components
@@ -76,8 +92,21 @@ class SelectorBIC(ModelSelector):
         """
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection based on BIC scores
-        raise NotImplementedError
+        best_score = float("inf")
+        best_model = self.base_model(self.n_constant)
+
+        for n_components in range(self.min_n_components, self.max_n_components+1):
+            try:
+                model, score = self.calc_score(n_components)
+
+                if score < best_score:
+                    best_score = score
+                    best_model = model
+            except Exception as e:
+                if self.verbose:
+                    print("Failure on {} with {} states. Err: {}".format(self.this_word, n_components, str(e)))
+
+        return best_model
 
 
 class SelectorDIC(ModelSelector):
@@ -90,11 +119,32 @@ class SelectorDIC(ModelSelector):
     DIC = log(P(X(i)) - 1/(M-1)SUM(log(P(X(all but i))
     '''
 
+    def calc_dic(self, n_components):
+        model = self.base_model(n_components)
+        mean_score = np.mean([model.score(self.hwords[w][0], self.hwords[w][1]) for w in self.words if w != self.this_word])
+        dic_score = model.score(self.X, self.lengths) - mean_score
+		
+        return model, dic_score
+
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection based on DIC scores
-        raise NotImplementedError
+        best_score = float('-Inf')
+        best_model = self.base_model(self.n_constant)
+        
+        for n_components in range(self.min_n_components, self.max_n_components+1):
+            try:
+                model, score = self.calc_dic(n_components)
+				
+                if score >= best_score:
+                    best_score = score
+                    best_model = model
+
+            except Exception as e:
+                if self.verbose:
+                    print("Failure on {} with {} states. Err: {}".format(self.this_word, n_components, str(e)))
+
+        return best_model
 
 
 class SelectorCV(ModelSelector):
@@ -102,8 +152,44 @@ class SelectorCV(ModelSelector):
 
     '''
 
+    def calc_cv(self, n_splits=2):
+        scores = []
+        splitter = KFold(n_splits)
+
+        for train, test in splitter.split(self.sequences):
+            try:
+                # Split according to splitter
+                X_train, len_train = combine_sequences(train, self.sequences)
+                X_test, len_test = combine_sequences(test, self.sequences)
+                
+                # train model
+                hmm_model = GaussianHMM(n_components=n_splits, covariance_type="diag", n_iter=1000,
+                                            random_state=self.random_state, verbose=False).fit(X_train, len_train)
+                # evaluate using test data
+                scores.append(hmm_model.score(X_test, len_test))
+
+            except Exception as e:
+                if self.verbose:
+                    print("Failure on {} with {} states. Err: {}".format(self.this_word, n_splits, str(e)))
+
+        return hmm_model, np.mean(scores)
+
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
 
-        # TODO implement model selection using CV
-        raise NotImplementedError
+        best_score = float('-Inf')
+        best_n = self.min_n_components
+		
+        for n_components in range(self.min_n_components, self.max_n_components+1):
+            try:			
+                model, score = self.calc_cv(n_components)
+
+                if score > best_score:
+                    best_score = score
+                    best_n = n_components
+
+            except Exception as e:
+                if self.verbose:
+                    print("Failure on {} with {} states. Err: {}".format(self.this_word, n_components, str(e)))
+
+        return self.base_model(best_n)
